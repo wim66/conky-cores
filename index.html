@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>conky-cores — a per-core CPU monitor for Conky</title>
+<meta name="description" content="A compact Conky widget for Linux that renders each CPU core with a rolling graph, load percentage and frequency in a liquid-glass Lua + Cairo style.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --ink: #05060b;
+    --panel: #0d1120;
+    --panel-2: #10152a;
+    --glass-line: rgba(255,255,255,0.08);
+    --glass-line-bright: rgba(255,255,255,0.16);
+    --frost: #cfd9e6;
+    --frost-bright: #eef2f7;
+    --mist: #7c8aa3;
+    --signal: #7fe7c4;
+    --ember: #e7660b;
+    --radius: 10px;
+    --mono: 'JetBrains Mono', ui-monospace, monospace;
+    --sans: 'Inter', system-ui, sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    margin: 0;
+    background:
+      radial-gradient(1200px 600px at 15% -10%, rgba(127,231,196,0.08), transparent 60%),
+      radial-gradient(1000px 700px at 100% 10%, rgba(231,102,11,0.06), transparent 55%),
+      var(--ink);
+    color: var(--frost);
+    font-family: var(--sans);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  a { color: var(--signal); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  a:focus-visible, button:focus-visible {
+    outline: 2px solid var(--signal);
+    outline-offset: 3px;
+  }
+
+  .wrap {
+    max-width: 1120px;
+    margin: 0 auto;
+    padding: 0 28px;
+  }
+
+  /* ---------- Signature component: the glass card ---------- */
+  .glass {
+    position: relative;
+    background: linear-gradient(180deg, rgba(255,255,255,0.05), rgba(255,255,255,0.015));
+    border: 1px solid var(--glass-line);
+    border-radius: var(--radius);
+    box-shadow: 0 20px 50px -25px rgba(0,0,0,0.7);
+    backdrop-filter: blur(2px);
+  }
+  .glass::before {
+    /* top highlight strip, echoing the widget's own glass-box layer */
+    content: "";
+    position: absolute;
+    top: 0; left: 12%; right: 12%;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--glass-line-bright), transparent);
+  }
+
+  /* ---------- Header ---------- */
+  header {
+    padding: 14px 0;
+    border-bottom: 1px solid var(--glass-line);
+  }
+  .header-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+  }
+  .wordmark {
+    font-family: var(--mono);
+    font-size: 14px;
+    color: var(--mist);
+    letter-spacing: 0.02em;
+  }
+  .wordmark b { color: var(--frost-bright); font-weight: 600; }
+  .gh-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--frost);
+    border: 1px solid var(--glass-line);
+    padding: 7px 14px;
+    border-radius: 999px;
+    transition: border-color 0.2s ease, color 0.2s ease;
+  }
+  .gh-link:hover {
+    border-color: var(--signal);
+    color: var(--signal);
+    text-decoration: none;
+  }
+  .gh-link svg { width: 15px; height: 15px; fill: currentColor; }
+
+  /* ---------- Hero ---------- */
+  .hero {
+    padding: 56px 0 56px;
+    display: grid;
+    grid-template-columns: 1.1fr 0.9fr;
+    gap: 32px;
+    align-items: center;
+  }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--signal);
+    margin: 0 0 18px;
+  }
+  h1 {
+    font-family: var(--mono);
+    font-weight: 700;
+    font-size: clamp(32px, 4.4vw, 48px);
+    line-height: 1.12;
+    color: var(--frost-bright);
+    margin: 0 0 20px;
+    letter-spacing: -0.01em;
+  }
+  h1 em {
+    font-style: normal;
+    color: var(--signal);
+  }
+  .lede {
+    font-size: 17px;
+    color: var(--mist);
+    max-width: 46ch;
+    margin: 0 0 24px;
+  }
+  .cta-row { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
+  .btn {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 13.5px;
+    padding: 11px 20px;
+    border-radius: var(--radius);
+    border: 1px solid var(--glass-line);
+    transition: border-color 0.2s ease, transform 0.2s ease, background 0.2s ease;
+  }
+  .btn:hover { text-decoration: none; transform: translateY(-1px); }
+  .btn-primary {
+    background: var(--signal);
+    color: #04120d;
+    border-color: var(--signal);
+    font-weight: 600;
+  }
+  .btn-primary:hover { background: #93f0d3; }
+  .btn-ghost { color: var(--frost); }
+  .btn-ghost:hover { border-color: var(--glass-line-bright); }
+
+  .env-tags { display: flex; gap: 10px; flex-wrap: wrap; }
+  .env-tag {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--mist);
+    border: 1px solid var(--glass-line);
+    border-radius: 999px;
+    padding: 4px 11px;
+  }
+
+  .hero-shot {
+    position: relative;
+    display: flex;
+    justify-content: center;
+  }
+  .hero-shot .glow {
+    position: absolute;
+    inset: -60px;
+    background: radial-gradient(closest-side, rgba(127,231,196,0.16), rgba(231,102,11,0.08) 55%, transparent 75%);
+    filter: blur(10px);
+    z-index: 0;
+  }
+  .hero-shot .glass {
+    position: relative;
+    z-index: 1;
+    padding: 10px;
+    max-width: 300px;
+  }
+  .hero-shot img {
+    display: block;
+    width: 100%;
+    height: auto;
+    border-radius: calc(var(--radius) - 4px);
+  }
+  .hero-caption {
+    text-align: center;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--mist);
+    margin-top: 14px;
+    letter-spacing: 0.03em;
+  }
+
+  /* ---------- Section shared ---------- */
+  section { padding: 32px 0; }
+  .section-head { margin-bottom: 20px; }
+  .section-num {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--signal);
+    letter-spacing: 0.1em;
+  }
+  h2 {
+    font-family: var(--mono);
+    font-size: 26px;
+    color: var(--frost-bright);
+    margin: 10px 0 8px;
+  }
+  .section-sub { color: var(--mist); max-width: 60ch; margin: 0; }
+
+  /* ---------- Features ---------- */
+  .features {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+  }
+  .feature {
+    padding: 16px;
+  }
+  .feature h3 {
+    font-family: var(--mono);
+    font-size: 14px;
+    color: var(--frost-bright);
+    margin: 0 0 8px;
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+  }
+  .feature p {
+    font-size: 13.5px;
+    color: var(--mist);
+    margin: 0 0 14px;
+  }
+  .readout {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--frost);
+    background: rgba(0,0,0,0.25);
+    border: 1px solid var(--glass-line);
+    border-radius: 6px;
+    padding: 8px 10px;
+    display: flex;
+    justify-content: space-between;
+  }
+  .readout .warm { color: var(--ember); }
+  .readout .cool { color: var(--signal); }
+
+  /* ---------- Variants ---------- */
+  .variants {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+  }
+  .variant-card { padding: 18px; }
+  .variant-card h3 {
+    font-family: var(--mono);
+    font-size: 14px;
+    color: var(--signal);
+    margin: 0 0 8px;
+  }
+  .variant-card p { color: var(--mist); font-size: 13.5px; margin: 0 0 12px; }
+  pre {
+    margin: 0;
+    background: rgba(0,0,0,0.3);
+    border: 1px solid var(--glass-line);
+    border-radius: 8px;
+    padding: 14px 16px;
+    overflow-x: auto;
+  }
+  code {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    color: var(--frost);
+  }
+  .tok { color: var(--signal); }
+  .str { color: var(--ember); }
+  .cmt { color: var(--mist); }
+
+  /* ---------- Install ---------- */
+  .steps { display: flex; flex-direction: column; gap: 10px; }
+  .step {
+    display: grid;
+    grid-template-columns: 44px 1fr;
+    gap: 14px;
+    padding: 16px 16px;
+    align-items: start;
+  }
+  .step-num {
+    font-family: var(--mono);
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--ember);
+  }
+  .step h3 {
+    font-family: var(--mono);
+    font-size: 14.5px;
+    color: var(--frost-bright);
+    margin: 2px 0 8px;
+  }
+  .step p { margin: 0 0 10px; color: var(--mist); font-size: 13.5px; }
+  .step pre { font-size: 12.5px; }
+
+  .req-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13.5px;
+  }
+  .req-table th, .req-table td {
+    text-align: left;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--glass-line);
+  }
+  .req-table th { color: var(--mist); font-weight: 500; font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.04em; text-transform: uppercase; }
+  .req-table td:first-child { font-family: var(--mono); color: var(--signal); }
+  .req-table td { color: var(--frost); }
+
+  footer {
+    padding: 24px 0 36px;
+    border-top: 1px solid var(--glass-line);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  footer p { margin: 0; color: var(--mist); font-size: 13px; font-family: var(--mono); }
+
+  @media (max-width: 860px) {
+    .hero { grid-template-columns: 1fr; padding-top: 56px; }
+    .hero-shot { order: -1; }
+    .features { grid-template-columns: repeat(2, 1fr); }
+    .variants { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 520px) {
+    .features { grid-template-columns: 1fr; }
+    .step { grid-template-columns: 32px 1fr; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+    * { transition: none !important; }
+  }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header>
+    <div class="header-row">
+      <div class="wordmark"><b>conky</b> / cores</div>
+      <a class="gh-link" href="https://github.com/wim66/conky-cores" target="_blank" rel="noopener">
+        <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false">
+          <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.81-.82-.12-.28-.02-.56.07-.72.09-.16.42-.52.82-.52.3 0 .5.38.56.53.1.27.34.91.94.91.46 0 .81-.18.95-.56.02-.04.07-.16.07-.43 0-.43-.07-.82-.15-1.02 0 0 2.14 1.26 5.09 1.26 3.12 0 4.8-1.93 4.8-4.13 0-2.33-1.34-3.45-3.28-3.45-1.13 0-2.15.46-2.59 1.13.48-.15 1.02-.61 1.02-1.08 0-.48-.32-1.02-.73-1.02-.42 0-.73.53-.85.93-.1.35-.41.91-.92.91-.5 0-.9-.56-1.08-1.13-.09-.3-.14-.64-.14-1.02 0-2.13 1.6-3.9 3.75-3.9 2.33 0 4 1.68 4 3.9 0 2.3-1.4 4.03-3.55 4.03-.57 0-1.06-.28-1.35-.66 0 0 .15.29.15.61 0 .46-.35.85-.77.85-.31 0-.56-.25-.56-.56 0-.3.25-.56.56-.56.12 0 .22.04.3.1.08-.24.12-.5.12-.78 0-.5-.1-.98-.3-1.4 0 0-.09.46-.58.46-.37 0-.68-.3-.68-.68s.31-.68.68-.68c.49 0 .95.32 1.23.74z"/>
+        </svg>
+        View on GitHub
+      </a>
+    </div>
+  </header>
+
+  <div class="hero">
+    <div>
+      <p class="eyebrow">Conky widget · Lua + Cairo</p>
+      <h1>Per-core CPU detail,<br>drawn like <em>glass</em>.</h1>
+      <p class="lede">
+        conky-cores is a compact Conky widget for Linux that renders each logical CPU core with a small rolling line graph, the current load percentage, and the current frequency in a translucent liquid-glass style.
+      </p>
+      <div class="cta-row">
+        <a class="btn btn-primary" href="#install">Run it</a>
+        <a class="btn btn-ghost" href="#configuration">Configure it ↓</a>
+      </div>
+      <div class="env-tags">
+        <span class="env-tag">Linux</span>
+        <span class="env-tag">Lua + Cairo</span>
+        <span class="env-tag">nproc / /proc/cpuinfo</span>
+        <span class="env-tag">Wayland &amp; X11</span>
+      </div>
+    </div>
+    <div class="hero-shot">
+      <div class="glow"></div>
+      <div class="glass">
+        <img src="preview.png" alt="conky-cores widget showing per-core CPU cards with a glass-like dark theme">
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="wrap">
+  <section id="features">
+    <div class="section-head">
+      <p class="section-num">01 — What it shows</p>
+      <h2>One compact box per core</h2>
+      <p class="section-sub">Each core cell includes a tiny graph, the current workload, and the current clock speed, arranged automatically based on the CPUs detected at startup.</p>
+    </div>
+    <div class="features">
+      <div class="feature glass">
+        <h3>Auto-detect</h3>
+        <p>The widget uses <code style="font-family:var(--mono)">nproc</code> to determine how many cores or threads to display.</p>
+      </div>
+      <div class="feature glass">
+        <h3>Two per row</h3>
+        <p>By default, the layout pairs cores side by side, with extra rows added as needed for larger systems.</p>
+      </div>
+      <div class="feature glass">
+        <h3>Rolling graph</h3>
+        <p>Every core keeps a short history so the line graph shows recent load changes smoothly.</p>
+      </div>
+      <div class="feature glass">
+        <h3>Glass styling</h3>
+        <p>The widget uses the same translucent card treatment as the companion Conky setup, with soft borders and highlights.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="requirements">
+    <div class="section-head">
+      <p class="section-num">02 — Requirements</p>
+      <h2>What it needs</h2>
+      <p class="section-sub">Conky with Lua and Cairo support is the main requirement, plus the standard Linux tools that expose CPU information.</p>
+    </div>
+    <div class="glass" style="padding: 8px 20px;">
+      <table class="req-table">
+        <tr><th>Requirement</th><th>Why</th></tr>
+        <tr><td>Conky</td><td>Runs the widget and renders the window.</td></tr>
+        <tr><td>Lua + Cairo</td><td>Draws the glass panels and graphs.</td></tr>
+        <tr><td>nproc</td><td>Detects the number of cores at startup.</td></tr>
+        <tr><td>/proc/cpuinfo</td><td>Provides the CPU model information shown in the header.</td></tr>
+      </table>
+    </div>
+  </section>
+
+  <section id="install">
+    <div class="section-head">
+      <p class="section-num">03 — Install</p>
+      <h2>Start it from this folder</h2>
+    </div>
+    <div class="steps">
+      <div class="step glass">
+        <div class="step-num">01</div>
+        <div>
+          <h3>Clone or open the repo</h3>
+          <pre><code>git clone https://github.com/your-username/conky-cores.git
+cd conky-cores</code></pre>
+        </div>
+      </div>
+      <div class="step glass">
+        <div class="step-num">02</div>
+        <div>
+          <h3>Launch Conky</h3>
+          <pre><code>./autostart.sh</code></pre>
+          <p>Or launch it directly with <code style="font-family:var(--mono)">conky -c ./conky.conf</code>.</p>
+        </div>
+      </div>
+      <div class="step glass">
+        <div class="step-num">03</div>
+        <div>
+          <h3>Tune the position</h3>
+          <p>If needed, adjust the window placement and size in <code style="font-family:var(--mono)">conky.conf</code> so the widget fits your desktop layout.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="configuration">
+    <div class="section-head">
+      <p class="section-num">04 — Configuration</p>
+      <h2>Adjust the widget</h2>
+      <p class="section-sub">Most tweaks live in the <code style="font-family:var(--mono)">CFG</code> table near the top of <code style="font-family:var(--mono)">widget.lua</code>.</p>
+    </div>
+    <div class="variants" style="grid-template-columns: 1fr; gap: 16px;">
+      <div class="glass" style="padding: 8px 20px;">
+        <p class="section-num" style="display:block; margin: 16px 0 4px;">Core layout</p>
+        <table class="req-table">
+          <tr><th>Setting</th><th>Default</th><th>Purpose</th></tr>
+          <tr><td>cores_per_row</td><td>2</td><td>Changes how many core boxes appear next to each other before wrapping to the next row.</td></tr>
+          <tr><td>graph_history_length</td><td>60</td><td>Controls how many samples are kept in the rolling graph history.</td></tr>
+          <tr><td>vertical_align</td><td>"top"</td><td>Lets you align the content block at the top, middle, or at a fixed pixel value.</td></tr>
+        </table>
+      </div>
+      <div class="glass" style="padding: 8px 20px;">
+        <p class="section-num" style="display:block; margin: 16px 0 4px;">Appearance</p>
+        <table class="req-table">
+          <tr><th>Setting</th><th>Default</th><th>Purpose</th></tr>
+          <tr><td>glass_base_color</td><td>0x08081A</td><td>Sets the base tint of the glass panels.</td></tr>
+          <tr><td>colors.text</td><td>0xDCE142</td><td>Changes the text color used for the core information.</td></tr>
+        </table>
+      </div>
+    </div>
+  </section>
+</div>
+
+<footer>
+  <div class="wrap" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px; padding-bottom:32px;">
+    <p>conky-cores — built for per-core CPU monitoring</p>
+  </div>
+</footer>
+
+</body>
+</html>
