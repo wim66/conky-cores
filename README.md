@@ -35,7 +35,7 @@ The layout is automatically adjusted based on the number of cores detected at st
 1. Clone the repository:
 
    ```sh
-   git clone https://github.com/your-username/conky-cores.git
+   git clone https://github.com/wim66/conky-cores.git
    cd conky-cores
    ```
 
