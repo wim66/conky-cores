@@ -115,19 +115,109 @@ end
 
 -- ==================== core detection ====================
 
--- Number of cores/threads is fixed for the life of the process -- detected
--- once here via `nproc`, not re-checked every frame. Falls back to 4 if
--- `nproc` isn't available for some reason.
-local NUM_CORES = tonumber(shell("nproc")) or 4
+-- `nproc` reports the number of LOGICAL cpus -- with hyperthreading/SMT
+-- enabled, that's the thread count, not the physical core count (e.g. a
+-- 4-core/8-thread CPU like the i5-1135G7 reports 8 here). This is what
+-- the per-row grid below actually iterates over, since conky's own
+-- ${cpu cpuN}/${freq_g N} report per LOGICAL cpu too -- so NUM_THREADS is
+-- the right count for "how many rows do we draw", one per schedulable
+-- logical cpu. Falls back to 4 if `nproc` isn't available for some reason.
+local NUM_THREADS = tonumber(shell("nproc")) or 4
+
+-- Physical core count, purely for the header readout (so it can say
+-- "4 Cores / 8 Threads" instead of calling threads "cores" when SMT is
+-- on). Counts unique (Core, Socket) pairs from lscpu's parseable output,
+-- which is correct even on multi-socket systems. Falls back to
+-- NUM_THREADS (i.e. the header just won't show a separate count) if
+-- `lscpu` isn't available.
+local PHYSICAL_CORES = tonumber(shell(
+    "lscpu -p=Core,Socket 2>/dev/null | grep -v '^#' | sort -u | wc -l"
+))
+if not PHYSICAL_CORES or PHYSICAL_CORES < 1 then PHYSICAL_CORES = NUM_THREADS end
+
+-- Maps each logical cpu (conky's 1-based cpuN index) to a "Core X -
+-- Thread Y" label, built once at startup from the same lscpu data as
+-- PHYSICAL_CORES above (CPU,Core,Socket per logical cpu). Threads
+-- sharing a physical core (SMT/hyperthreading) get the same Core number
+-- and increasing Thread numbers, in the order lscpu lists them -- this
+-- is what actually shows the physical-core grouping (e.g. "Core 3 -
+-- Thread 1" and "Core 3 - Thread 2" both being the SAME physical core)
+-- instead of implying every row is an independent core. On a CPU with
+-- no SMT, a core has only one thread, so the label just says "Core X"
+-- with no thread suffix at all. Falls back to an empty table (each row
+-- then just shows "CPU N-1", see draw_core_cell) if lscpu isn't available.
+local THREAD_LABEL = {}
+
+-- The grid order the cells get drawn in -- NOT conky's raw 1..NUM_THREADS
+-- cpu-index order. Grouped per physical core instead (all of Core 0's
+-- threads consecutively, then all of Core 1's, ...), so that with
+-- CFG.cores_per_row = 2, each row is one physical core's own threads
+-- side by side (e.g. "Core 3 - Thread 1" next to "Core 3 - Thread 2"),
+-- rather than pairing up whichever cpu numbers happen to fall in the
+-- same row of the raw index order. Falls back to plain 1..NUM_THREADS
+-- (built after NUM_THREADS is known, see below) if lscpu isn't available.
+local DISPLAY_ORDER = nil
+
+do
+    local lscpu_out = shell("lscpu -p=CPU,Core,Socket 2>/dev/null")
+    if lscpu_out and lscpu_out ~= "" then
+        local core_order = {}    -- ordered list of unique "core,socket" keys
+        local core_index = {}    -- "core,socket" key -> display core number (0-based)
+        local cpus_per_core = {} -- "core,socket" key -> ordered list of conky cpu numbers (1-based)
+        for line in lscpu_out:gmatch("[^\n]+") do
+            if not line:match("^#") then
+                local cpu, core, socket = line:match("^(%d+),(%d+),(%d+)")
+                if cpu then
+                    local key = core .. "," .. socket
+                    if core_index[key] == nil then
+                        core_index[key] = #core_order
+                        core_order[#core_order + 1] = key
+                        cpus_per_core[key] = {}
+                    end
+                    -- lscpu's CPU column is 0-based; conky's cpuN is 1-based
+                    table.insert(cpus_per_core[key], tonumber(cpu) + 1)
+                end
+            end
+        end
+        DISPLAY_ORDER = {}
+        for _, key in ipairs(core_order) do
+            local cnum = core_index[key]
+            local cpus = cpus_per_core[key]
+            if #cpus == 1 then
+                THREAD_LABEL[cpus[1]] = "Core " .. cnum
+            else
+                for t, cpu1 in ipairs(cpus) do
+                    THREAD_LABEL[cpu1] = "Core " .. cnum .. " - Thread " .. t
+                end
+            end
+            for _, cpu1 in ipairs(cpus) do
+                DISPLAY_ORDER[#DISPLAY_ORDER + 1] = cpu1
+            end
+        end
+    end
+end
+
+-- Fall back to plain conky cpu-index order (1, 2, 3, ... NUM_THREADS) if
+-- lscpu wasn't available above (DISPLAY_ORDER is still nil), OR if lscpu
+-- WAS available but disagreed with nproc on how many cpus there are
+-- (e.g. inside a cgroup/container with a CPU-affinity limit -- nproc
+-- respects that restriction while lscpu -p may not). Better a plain
+-- sequential grid than one built from a mismatched cpu list, which could
+-- pair up or drop the wrong rows entirely.
+if DISPLAY_ORDER == nil or #DISPLAY_ORDER ~= NUM_THREADS then
+    DISPLAY_ORDER = {}
+    THREAD_LABEL = {}
+    for i = 1, NUM_THREADS do DISPLAY_ORDER[i] = i end
+end
 
 -- Cosmetic only (shown in the header box) -- if this fails for any reason
 -- the header just omits the model line.
 local CPU_MODEL = shell("grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | sed 's/^ *//'")
 
--- One rolling history buffer per core, indexed 1..NUM_CORES to match
+-- One rolling history buffer per thread, indexed 1..NUM_THREADS to match
 -- conky's own 1-based cpuN/freq_g N numbering.
 local core_hist = {}
-for i = 1, NUM_CORES do core_hist[i] = {} end
+for i = 1, NUM_THREADS do core_hist[i] = {} end
 
 local function push_value(buffer, maxlen, value)
     table.insert(buffer, value)
@@ -255,8 +345,14 @@ local function draw_text(cr, x, y, text, size, color_hex, alpha, bold, align)
     cairo_show_text(cr, text)
 end
 
--- Mini graph styled like graphs.lua (filled area gradient + border line)
-local function draw_mini_graph(cr, x, y, w, h, values, max, color_hex)
+-- Mini graph styled like graphs.lua (filled area gradient + border line).
+-- Deliberately always the same fixed red(top)/green(bottom) "VU meter"
+-- gradient regardless of the current reading -- so there's no
+-- `color_hex` parameter here to wire up: a per-call colour would only
+-- ever apply to the single-sample dot fallback below, creating a jarring
+-- colour jump the moment the second sample arrives and the real gradient
+-- takes over.
+local function draw_mini_graph(cr, x, y, w, h, values, max)
     local n = #values
     if n < 1 then return end
     max = math.max(max, 1)
@@ -269,8 +365,11 @@ local function draw_mini_graph(cr, x, y, w, h, values, max, color_hex)
     cairo_scale(cr, 1, -1)
 
     if n == 1 then
+        -- Not enough history yet for a line -- draw a single dot in the
+        -- gradient's own bottom-of-scale colour (bright green) so there's
+        -- no jarring colour jump once the second sample arrives.
         local v0 = math.min(values[1], max)
-        cairo_set_source_rgba(cr, hex_to_rgba(color_hex, 0.9))
+        cairo_set_source_rgba(cr, hex_to_rgba(0x00FF00, 0.9))
         cairo_arc(cr, 0, (v0 / max) * h, 1.5, 0, 2 * math.pi)
         cairo_fill(cr)
         cairo_restore(cr)
@@ -331,43 +430,52 @@ end
 
 local function draw_header(cr, x, y, w, h)
     draw_text(cr, x, y + 14, "CPU Cores", 14, CFG.colors.accent1, 1, true)
-    local subtitle = NUM_CORES .. (NUM_CORES == 1 and " core" or " cores")
+    local subtitle
+    if PHYSICAL_CORES == NUM_THREADS then
+        subtitle = NUM_THREADS .. (NUM_THREADS == 1 and " Core" or " Cores")
+    else
+        subtitle = PHYSICAL_CORES .. (PHYSICAL_CORES == 1 and " Core / " or " Cores / ")
+            .. NUM_THREADS .. (NUM_THREADS == 1 and " Thread" or " Threads")
+    end
     draw_text(cr, x + w, y + 14, subtitle, 11, CFG.colors.text, 0.7, false, "right")
     if CPU_MODEL and CPU_MODEL ~= "" then
         draw_text(cr, x, y + 32, CPU_MODEL, 10, CFG.colors.text, 0.75)
     end
 end
 
--- One core's label + graph, drawn in a (x,y,w,h) cell. `core_num` is
--- 1-based (conky's own cpuN/freq_g N numbering); displayed as "Core N-1"
--- to match the 0-based numbering htop/lscpu use, since that's what most
--- people expect to see.
+-- One thread's (logical cpu's) label + graph, drawn in a (x,y,w,h) cell.
+-- `core_num` is 1-based (conky's own cpuN/freq_g N numbering). Two text
+-- lines: the Core/Thread label on its own (it's the longest string here,
+-- see the width check that motivated splitting it out -- "Core 3 -
+-- Thread 2" alone fits a ~145px column comfortably, but doesn't leave
+-- room for frequency on the same line, let alone with double-digit core
+-- numbers), then frequency + load% together on the line below.
 local function draw_core_cell(cr, x, y, w, h, core_num)
     local load = num(conky_parse("${cpu cpu" .. core_num .. "}"))
     local freq = conky_parse("${freq_g " .. core_num .. "}")
     push_value(core_hist[core_num], CFG.graph_history_length, load)
 
-    local label = "Core " .. (core_num - 1)
-    if freq and freq ~= "" and freq ~= "0.00" then
-        label = label .. "  " .. freq .. "GHz"
-    end
-
+    local label = THREAD_LABEL[core_num] or ("CPU " .. (core_num - 1))
     local col = load_color(load)
-    -- y + 8 gives the text some space from the top edge
+
     draw_text(cr, x, y + 8, label, 10, CFG.colors.text, 0.9)
-    draw_text(cr, x + w, y + 8, string.format("%.0f%%", load), 10, col, 1, true, "right")
-    -- graph now starts at y + 14 and gets h - 14 height
-    draw_mini_graph(cr, x, y + 14, w, h - 14, core_hist[core_num], 100, col)
+    if freq and freq ~= "" and freq ~= "0.00" then
+        draw_text(cr, x, y + 22, freq .. "GHz", 10, CFG.colors.text, 0.75)
+    end
+    draw_text(cr, x + w, y + 22, string.format("%.0f%%", load), 10, col, 1, true, "right")
+    draw_mini_graph(cr, x, y + 28, w, h - 28, core_hist[core_num], 100)
 end
 
 local function cores_grid_rows()
-    return math.ceil(NUM_CORES / CFG.cores_per_row)
+    return math.ceil(NUM_THREADS / CFG.cores_per_row)
 end
 
 -- Height needed for the cores grid alone (no box padding) -- exposed
 -- separately from draw_cores() so the layout below can size the box
 -- correctly before anything is drawn.
-local ROW_H = 50
+-- ROW_H = label line (Core/Thread) + freq/pct line + graph -- 14px taller
+-- than before to make room for the extra Core/Thread label line.
+local ROW_H = 64
 local ROW_GAP = 15
 local function cores_grid_height()
     local rows = cores_grid_rows()
@@ -379,12 +487,12 @@ local function draw_cores(cr, x, y, w, h)
     local col_gap = 12
     local col_w = (w - (cols - 1) * col_gap) / cols
 
-    for i = 1, NUM_CORES do
+    for i, core_num in ipairs(DISPLAY_ORDER) do
         local row = math.floor((i - 1) / cols)
         local col = (i - 1) % cols
         local cx = x + col * (col_w + col_gap)
         local cy = y + row * (ROW_H + ROW_GAP)
-        draw_core_cell(cr, cx, cy, col_w, ROW_H, i)
+        draw_core_cell(cr, cx, cy, col_w, ROW_H, core_num)
     end
 end
 
@@ -420,8 +528,8 @@ local function draw_canvas_debug_overlay(cr, canvas_w, canvas_h, content_h)
 
     local needed = math.ceil(content_h + 2 * CFG.top_margin)
     local fits = needed <= canvas_h
-    local msg = string.format("canvas %dx%d | %d cores | content needs ~%dpx tall | %s",
-        canvas_w, canvas_h, NUM_CORES, needed,
+    local msg = string.format("canvas %dx%d | %d threads | content needs ~%dpx tall | %s",
+        canvas_w, canvas_h, NUM_THREADS, needed,
         fits and "fits" or ("SHORT by " .. (needed - canvas_h) .. "px"))
     draw_text(cr, 4, canvas_h - 6, msg, 9, fits and CFG.colors.accent3 or CFG.colors.danger, 1, true)
 end
@@ -431,14 +539,17 @@ local function draw_all(cr, canvas_w, canvas_h)
     local w = canvas_w - 2 * CFG.margin
     local content_h = total_content_height()
 
+    local align_num = tonumber(CFG.vertical_align)
     local y
+
     if CFG.vertical_align == "middle" then
         y = (canvas_h - content_h) / 2
-    elseif tonumber(CFG.vertical_align) then
-        y = tonumber(CFG.vertical_align)
-        y = math.max(0, math.min(y, canvas_h - content_h))
+    elseif align_num then
+        -- Vang af dat max_y niet negatief wordt als de inhoud te hoog is
+        local max_y = math.max(0, canvas_h - content_h)
+        y = math.max(0, math.min(align_num, max_y))
     else
-        y = CFG.top_margin
+        y = CFG.top_margin or 0
     end
 
     for _, sec in ipairs(SECTIONS) do

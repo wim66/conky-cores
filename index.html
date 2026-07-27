@@ -379,7 +379,7 @@
       <p class="eyebrow">Conky widget · Lua + Cairo</p>
       <h1>Per-core CPU detail,<br>drawn like <em>glass</em>.</h1>
       <p class="lede">
-        conky-cores is a compact Conky widget for Linux that renders each logical CPU core with a small rolling line graph, the current load percentage, and the current frequency in a translucent liquid-glass style.
+        conky-cores detects both logical CPUs and physical cores, groups SMT threads, and shows each core with a rolling graph, the current load, and the current frequency in a translucent liquid-glass style.
       </p>
       <div class="cta-row">
         <a class="btn btn-primary" href="#install">Run it</a>
@@ -410,20 +410,20 @@
     </div>
     <div class="features">
       <div class="feature glass">
-        <h3>Auto-detect</h3>
-        <p>The widget uses <code style="font-family:var(--mono)">nproc</code> to determine how many cores or threads to display.</p>
+        <h3>SMT-aware</h3>
+        <p>The widget uses <code style="font-family:var(--mono)">nproc</code> and <code style="font-family:var(--mono)">lscpu</code> to detect logical CPUs, physical cores, and thread grouping.</p>
       </div>
       <div class="feature glass">
-        <h3>Two per row</h3>
-        <p>By default, the layout pairs cores side by side, with extra rows added as needed for larger systems.</p>
+        <h3>Physical-core labels</h3>
+        <p>Threads are grouped by physical core and shown as “Core X” or “Core X - Thread Y” instead of treating every CPU as a separate core.</p>
       </div>
       <div class="feature glass">
-        <h3>Rolling graph</h3>
-        <p>Every core keeps a short history so the line graph shows recent load changes smoothly.</p>
+        <h3>Live readouts</h3>
+        <p>Each cell shows a rolling graph, the current load percentage, and the current frequency in GHz.</p>
       </div>
       <div class="feature glass">
-        <h3>Glass styling</h3>
-        <p>The widget uses the same translucent card treatment as the companion Conky setup, with soft borders and highlights.</p>
+        <h3>Flexible layout</h3>
+        <p>Rows, spacing, vertical alignment, and a debug canvas overlay are all configurable from the Lua settings.</p>
       </div>
     </div>
   </section>
@@ -438,9 +438,10 @@
       <table class="req-table">
         <tr><th>Requirement</th><th>Why</th></tr>
         <tr><td>Conky</td><td>Runs the widget and renders the window.</td></tr>
-        <tr><td>Lua + Cairo</td><td>Draws the glass panels and graphs.</td></tr>
-        <tr><td>nproc</td><td>Detects the number of cores at startup.</td></tr>
-        <tr><td>/proc/cpuinfo</td><td>Provides the CPU model information shown in the header.</td></tr>
+        <tr><td>Lua + Cairo</td><td>Draws the glass panels, text, and graphs.</td></tr>
+        <tr><td>nproc</td><td>Detects the number of logical CPUs to display.</td></tr>
+        <tr><td>lscpu</td><td>Improves physical-core detection and the header readout for “Cores / Threads”.</td></tr>
+        <tr><td>/proc/cpuinfo</td><td>Provides the CPU model shown in the header.</td></tr>
       </table>
     </div>
   </section>
@@ -491,6 +492,7 @@ cd conky-cores</code></pre>
           <tr><td>cores_per_row</td><td>2</td><td>Changes how many core boxes appear next to each other before wrapping to the next row.</td></tr>
           <tr><td>graph_history_length</td><td>60</td><td>Controls how many samples are kept in the rolling graph history.</td></tr>
           <tr><td>vertical_align</td><td>"top"</td><td>Lets you align the content block at the top, middle, or at a fixed pixel value.</td></tr>
+          <tr><td>debug_show_canvas</td><td>false</td><td>Shows a canvas-size overlay that helps tune the window height.</td></tr>
         </table>
       </div>
       <div class="glass" style="padding: 8px 20px;">
@@ -498,7 +500,9 @@ cd conky-cores</code></pre>
         <table class="req-table">
           <tr><th>Setting</th><th>Default</th><th>Purpose</th></tr>
           <tr><td>glass_base_color</td><td>0x08081A</td><td>Sets the base tint of the glass panels.</td></tr>
+          <tr><td>glass_base_alpha</td><td>0.35</td><td>Adjusts the opacity of the background layer.</td></tr>
           <tr><td>colors.text</td><td>0xDCE142</td><td>Changes the text color used for the core information.</td></tr>
+          <tr><td>corner_radius</td><td>10</td><td>Tunes how rounded the card corners appear.</td></tr>
         </table>
       </div>
     </div>
